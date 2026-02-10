@@ -1,0 +1,146 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'JHB Real Estate Data Lake - S3 Bucket with Lifecycle Policies (Free Tier Optimized)'
+
+Parameters:
+  BucketName:
+    Type: String
+    Default: jhb-realestate-datalake
+    Description: Name of the S3 bucket (must be globally unique)
+    AllowedPattern: '^[a-z0-9][a-z0-9-]*[a-z0-9]$'
+    ConstraintDescription: Bucket name must be lowercase, alphanumeric, and hyphens only
+
+Resources:
+  DataLakeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldRawData
+            Status: Enabled
+            Prefix: raw/
+            ExpirationInDays: 30
+            NoncurrentVersionExpirationInDays: 7
+          - Id: DeleteOldProcessedData
+            Status: Enabled
+            Prefix: processed/
+            ExpirationInDays: 90
+            NoncurrentVersionExpirationInDays: 7
+          - Id: TransitionToIA
+            Status: Enabled
+            Prefix: analytics/
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+      Tags:
+        - Key: Project
+          Value: JHB-RealEstate-Pipeline
+        - Key: Environment
+          Value: Development
+        - Key: CostCenter
+          Value: FreeTier
+
+  DatabricksAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${BucketName}-databricks-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'sts:AssumeRole'
+            Condition:
+              StringEquals:
+                'sts:ExternalId': 'databricks-external-id'
+      ManagedPolicyArns:
+        - !Ref DatabricksS3Policy
+
+  DatabricksS3Policy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${BucketName}-databricks-s3-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ListBucket
+            Effect: Allow
+            Action:
+              - 's3:ListBucket'
+              - 's3:GetBucketLocation'
+            Resource: !GetAtt DataLakeBucket.Arn
+          - Sid: ReadWriteObjects
+            Effect: Allow
+            Action:
+              - 's3:GetObject'
+              - 's3:PutObject'
+              - 's3:DeleteObject'
+            Resource: !Sub '${DataLakeBucket.Arn}/*'
+
+  FivetranUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: !Sub '${BucketName}-fivetran-user'
+      ManagedPolicyArns:
+        - !Ref FivetranS3Policy
+
+  FivetranS3Policy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${BucketName}-fivetran-s3-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ListBucket
+            Effect: Allow
+            Action:
+              - 's3:ListBucket'
+              - 's3:GetBucketLocation'
+            Resource: !GetAtt DataLakeBucket.Arn
+          - Sid: WriteObjects
+            Effect: Allow
+            Action:
+              - 's3:PutObject'
+              - 's3:PutObjectAcl'
+            Resource: !Sub '${DataLakeBucket.Arn}/*'
+
+Outputs:
+  BucketName:
+    Description: Name of the S3 bucket
+    Value: !Ref DataLakeBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-BucketName'
+
+  BucketArn:
+    Description: ARN of the S3 bucket
+    Value: !GetAtt DataLakeBucket.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-BucketArn'
+
+  DatabricksRoleArn:
+    Description: IAM Role ARN for Databricks access
+    Value: !GetAtt DatabricksAccessRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-DatabricksRoleArn'
+
+  FivetranUserArn:
+    Description: IAM User ARN for Fivetran
+    Value: !GetAtt FivetranUser.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-FivetranUserArn'
+
+  DeploymentInstructions:
+    Description: Next steps after deployment
+    Value: |
+      1. Create access keys for Fivetran user: aws iam create-access-key --user-name <FivetranUser>
+      2. Configure Fivetran with access keys
+      3. Update Databricks with Role ARN for S3 access
+      4. Verify Free Tier limits: 5GB storage, 20,000 GET requests/month
